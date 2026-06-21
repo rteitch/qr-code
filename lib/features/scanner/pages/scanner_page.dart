@@ -99,20 +99,20 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
       debugPrint('History save error: $e');
     }
 
-    if (mounted) {
-      // Pause the scanner before navigating
-      await _controller?.stop();
+    // Pause the scanner before navigating
+    await _controller?.stop();
 
-      context.push('/result', extra: {'content': code, 'type': type}).then((_) {
-        // Resume scanning when returning from result page
-        if (mounted) {
-          setState(() {
-            _isProcessing = false;
-          });
-          _controller?.start();
-        }
-      });
-    }
+    if (!mounted) return;
+
+    context.push('/result', extra: {'content': code, 'type': type}).then((_) {
+      // Resume scanning when returning from result page
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
+        _controller?.start();
+      }
+    });
   }
 
   void _toggleFlash() async {
