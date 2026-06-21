@@ -15,18 +15,19 @@ class ScannerPage extends ConsumerStatefulWidget {
   ConsumerState<ScannerPage> createState() => _ScannerPageState();
 }
 
-class _ScannerPageState extends ConsumerState<ScannerPage>
-    with WidgetsBindingObserver {
-  // Let mobile_scanner manage its own controller lifecycle
-  MobileScannerController? _controller;
+class _ScannerPageState extends ConsumerState<ScannerPage> {
+  // Use a key to rebuild MobileScanner when retrying
+  UniqueKey _scannerKey = UniqueKey();
   bool _isProcessing = false;
-  bool _hasError = false;
-  String _errorMessage = '';
+  MobileScannerController? _controller;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
+    _createController();
+  }
+
+  void _createController() {
     _controller = MobileScannerController(
       autoStart: true,
       detectionSpeed: DetectionSpeed.normal,
@@ -36,26 +37,8 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
     _controller?.dispose();
     super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (_controller == null) return;
-    switch (state) {
-      case AppLifecycleState.resumed:
-        _controller!.start();
-        break;
-      case AppLifecycleState.inactive:
-      case AppLifecycleState.paused:
-      case AppLifecycleState.hidden:
-        _controller!.stop();
-        break;
-      case AppLifecycleState.detached:
-        break;
-    }
   }
 
   void _onDetect(BarcodeCapture capture) async {
@@ -85,7 +68,7 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
       debugPrint('History save error: $e');
     }
 
-    // Pause the scanner before navigating
+    // Pause the scanner
     await _controller?.stop();
 
     if (!mounted) return;
@@ -97,6 +80,14 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
         });
         _controller?.start();
       }
+    });
+  }
+
+  void _retryScanner() {
+    _controller?.dispose();
+    setState(() {
+      _scannerKey = UniqueKey();
+      _createController();
     });
   }
 
@@ -114,19 +105,6 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
     } catch (e) {
       debugPrint('Camera switch error: $e');
     }
-  }
-
-  void _retryScanner() {
-    setState(() {
-      _hasError = false;
-      _errorMessage = '';
-    });
-    _controller?.dispose();
-    _controller = MobileScannerController(
-      autoStart: true,
-      detectionSpeed: DetectionSpeed.normal,
-      returnImage: false,
-    );
   }
 
   @override
@@ -202,10 +180,6 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
   }
 
   Widget _buildScannerView() {
-    if (_hasError) {
-      return _buildErrorView();
-    }
-
     return ClipRRect(
       borderRadius: BorderRadius.circular(16),
       child: Container(
@@ -220,12 +194,12 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
         child: ClipRRect(
           borderRadius: BorderRadius.circular(14),
           child: MobileScanner(
+            key: _scannerKey,
             controller: _controller!,
             onDetect: _onDetect,
             errorBuilder: (context, error, child) {
-              // Log the actual error for debugging
-              debugPrint('MobileScanner error: ${error.errorCode} - ${error.errorDetails}');
-              
+              debugPrint('MobileScanner error: ${error.errorCode}');
+
               return Container(
                 color: Colors.black,
                 child: Center(
@@ -250,7 +224,7 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
                         ),
                         const SizedBox(height: 8),
                         Text(
-                          error.errorCode.name,
+                          _getErrorMessage(error.errorCode),
                           textAlign: TextAlign.center,
                           style: const TextStyle(
                             color: Colors.white54,
@@ -301,51 +275,18 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
     );
   }
 
-  Widget _buildErrorView() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(
-              Icons.error_outline,
-              color: Colors.redAccent,
-              size: 64,
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'Scanner Error',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              _errorMessage,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.white54, fontSize: 13),
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton.icon(
-              onPressed: _retryScanner,
-              icon: const Icon(Icons.refresh),
-              label: const Text('Coba Lagi'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppConstants.primaryColor,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 24,
-                  vertical: 12,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+  String _getErrorMessage(MobileScannerErrorCode errorCode) {
+    switch (errorCode) {
+      case MobileScannerErrorCode.permissionDenied:
+        return 'Izin kamera ditolak. Berikan izin kamera di Pengaturan aplikasi.';
+      case MobileScannerErrorCode.unsupported:
+        return 'Kamera tidak didukung pada perangkat ini.';
+      case MobileScannerErrorCode.controllerUninitialized:
+        return 'Scanner belum siap. Coba lagi dalam beberapa saat.';
+      case MobileScannerErrorCode.genericError:
+      default:
+        return 'Terjadi kesalahan saat mengakses kamera. Pastikan tidak ada aplikasi lain yang menggunakan kamera.';
+    }
   }
 
   Widget _buildZoomSlider() {
@@ -359,7 +300,6 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
         onChanged: (value) {
           ref.read(scannerProvider.notifier).setZoom(value);
           try {
-            // mobile_scanner setZoomScale accepts 0.0 to 1.0
             _controller?.setZoomScale(value / AppConstants.maxZoom);
           } catch (e) {
             debugPrint('Zoom error: $e');
