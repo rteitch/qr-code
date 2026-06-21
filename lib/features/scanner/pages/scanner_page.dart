@@ -16,18 +16,12 @@ class ScannerPage extends ConsumerStatefulWidget {
 }
 
 class _ScannerPageState extends ConsumerState<ScannerPage> {
-  // Use a key to rebuild MobileScanner when retrying
-  UniqueKey _scannerKey = UniqueKey();
+  late MobileScannerController _controller;
   bool _isProcessing = false;
-  MobileScannerController? _controller;
 
   @override
   void initState() {
     super.initState();
-    _createController();
-  }
-
-  void _createController() {
     _controller = MobileScannerController(
       autoStart: true,
       detectionSpeed: DetectionSpeed.normal,
@@ -37,7 +31,7 @@ class _ScannerPageState extends ConsumerState<ScannerPage> {
 
   @override
   void dispose() {
-    _controller?.dispose();
+    _controller.dispose();
     super.dispose();
   }
 
@@ -68,8 +62,12 @@ class _ScannerPageState extends ConsumerState<ScannerPage> {
       debugPrint('History save error: $e');
     }
 
-    // Pause the scanner
-    await _controller?.stop();
+    // Stop scanner before navigating
+    try {
+      await _controller.stop();
+    } catch (e) {
+      debugPrint('Stop error: $e');
+    }
 
     if (!mounted) return;
 
@@ -78,22 +76,14 @@ class _ScannerPageState extends ConsumerState<ScannerPage> {
         setState(() {
           _isProcessing = false;
         });
-        _controller?.start();
+        _controller.start();
       }
-    });
-  }
-
-  void _retryScanner() {
-    _controller?.dispose();
-    setState(() {
-      _scannerKey = UniqueKey();
-      _createController();
     });
   }
 
   void _toggleFlash() async {
     try {
-      await _controller?.toggleTorch();
+      await _controller.toggleTorch();
     } catch (e) {
       debugPrint('Flash toggle error: $e');
     }
@@ -101,7 +91,7 @@ class _ScannerPageState extends ConsumerState<ScannerPage> {
 
   Future<void> _switchCamera() async {
     try {
-      await _controller?.switchCamera();
+      await _controller.switchCamera();
     } catch (e) {
       debugPrint('Camera switch error: $e');
     }
@@ -109,14 +99,140 @@ class _ScannerPageState extends ConsumerState<ScannerPage> {
 
   @override
   Widget build(BuildContext context) {
+    final scannerState = ref.watch(scannerProvider);
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
         child: Column(
           children: [
             _buildHeader(),
-            Expanded(child: _buildScannerView()),
-            _buildZoomSlider(),
+            Expanded(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 24),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: AppConstants.primaryColor.withValues(alpha: 0.6),
+                      width: 2,
+                    ),
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(14),
+                    child: MobileScanner(
+                      controller: _controller,
+                      onDetect: _onDetect,
+                      errorBuilder: (context, error, child) {
+                        debugPrint(
+                            'Scanner error: ${error.errorCode} - ${error.errorDetails}');
+                        return Container(
+                          color: Colors.black,
+                          child: Center(
+                            child: Padding(
+                              padding: const EdgeInsets.all(24),
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const Icon(
+                                    Icons.videocam_off,
+                                    color: Colors.white38,
+                                    size: 64,
+                                  ),
+                                  const SizedBox(height: 16),
+                                  const Text(
+                                    'Kamera tidak tersedia',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    _getErrorMessage(error.errorCode),
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      color: Colors.white54,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 24),
+                                  ElevatedButton.icon(
+                                    onPressed: () {
+                                      _controller.dispose();
+                                      setState(() {
+                                        _controller = MobileScannerController(
+                                          autoStart: true,
+                                          detectionSpeed:
+                                              DetectionSpeed.normal,
+                                          returnImage: false,
+                                        );
+                                      });
+                                    },
+                                    icon: const Icon(Icons.refresh),
+                                    label: const Text('Coba Lagi'),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor:
+                                          AppConstants.primaryColor,
+                                      foregroundColor: Colors.white,
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 24,
+                                        vertical: 12,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                      placeholderBuilder: (context, child) {
+                        return Container(
+                          color: Colors.black,
+                          child: const Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                CircularProgressIndicator(
+                                  color: AppConstants.primaryColor,
+                                ),
+                                SizedBox(height: 16),
+                                Text(
+                                  'Memulai kamera...',
+                                  style: TextStyle(
+                                    color: Colors.white54,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+              child: ZoomSlider(
+                value: scannerState.currentZoom,
+                min: AppConstants.minZoom,
+                max: AppConstants.maxZoom,
+                onChanged: (value) {
+                  ref.read(scannerProvider.notifier).setZoom(value);
+                  try {
+                    _controller.setZoomScale(value / AppConstants.maxZoom);
+                  } catch (e) {
+                    debugPrint('Zoom error: $e');
+                  }
+                },
+              ),
+            ),
             const SizedBox(height: 16),
           ],
         ),
@@ -179,102 +295,6 @@ class _ScannerPageState extends ConsumerState<ScannerPage> {
     );
   }
 
-  Widget _buildScannerView() {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(16),
-      child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 24),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: AppConstants.primaryColor.withValues(alpha: 0.6),
-            width: 2,
-          ),
-        ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(14),
-          child: MobileScanner(
-            key: _scannerKey,
-            controller: _controller!,
-            onDetect: _onDetect,
-            errorBuilder: (context, error, child) {
-              debugPrint('MobileScanner error: ${error.errorCode}');
-
-              return Container(
-                color: Colors.black,
-                child: Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const Icon(
-                          Icons.videocam_off,
-                          color: Colors.white38,
-                          size: 64,
-                        ),
-                        const SizedBox(height: 16),
-                        const Text(
-                          'Kamera tidak tersedia',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          _getErrorMessage(error.errorCode),
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: Colors.white54,
-                            fontSize: 13,
-                          ),
-                        ),
-                        const SizedBox(height: 24),
-                        ElevatedButton.icon(
-                          onPressed: _retryScanner,
-                          icon: const Icon(Icons.refresh),
-                          label: const Text('Coba Lagi'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: AppConstants.primaryColor,
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 24,
-                              vertical: 12,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              );
-            },
-            placeholderBuilder: (context, child) {
-              return Container(
-                color: Colors.black,
-                child: const Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CircularProgressIndicator(color: AppConstants.primaryColor),
-                      SizedBox(height: 16),
-                      Text(
-                        'Memulai kamera...',
-                        style: TextStyle(color: Colors.white54, fontSize: 14),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-      ),
-    );
-  }
-
   String _getErrorMessage(MobileScannerErrorCode errorCode) {
     switch (errorCode) {
       case MobileScannerErrorCode.permissionDenied:
@@ -282,30 +302,10 @@ class _ScannerPageState extends ConsumerState<ScannerPage> {
       case MobileScannerErrorCode.unsupported:
         return 'Kamera tidak didukung pada perangkat ini.';
       case MobileScannerErrorCode.controllerUninitialized:
-        return 'Scanner belum siap. Coba lagi dalam beberapa saat.';
+        return 'Scanner belum siap. Coba lagi.';
       case MobileScannerErrorCode.genericError:
       default:
-        return 'Terjadi kesalahan saat mengakses kamera. Pastikan tidak ada aplikasi lain yang menggunakan kamera.';
+        return 'Terjadi kesalahan saat mengakses kamera.';
     }
-  }
-
-  Widget _buildZoomSlider() {
-    final scannerState = ref.watch(scannerProvider);
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
-      child: ZoomSlider(
-        value: scannerState.currentZoom,
-        min: AppConstants.minZoom,
-        max: AppConstants.maxZoom,
-        onChanged: (value) {
-          ref.read(scannerProvider.notifier).setZoom(value);
-          try {
-            _controller?.setZoomScale(value / AppConstants.maxZoom);
-          } catch (e) {
-            debugPrint('Zoom error: $e');
-          }
-        },
-      ),
-    );
   }
 }
