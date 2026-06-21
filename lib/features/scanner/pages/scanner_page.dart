@@ -6,7 +6,6 @@ import 'package:permission_handler/permission_handler.dart';
 import '../../../core/utils/constants.dart';
 import '../../../models/scan_history.dart';
 import '../../history/providers/history_provider.dart';
-import '../../settings/providers/settings_provider.dart';
 import '../providers/scanner_provider.dart';
 import '../widgets/zoom_slider.dart';
 
@@ -22,6 +21,7 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
   MobileScannerController? _controller;
   bool _hasPermission = false;
   bool _isProcessing = false;
+  bool _isInitialized = false;
 
   @override
   void initState() {
@@ -39,7 +39,7 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (_controller == null) return;
+    if (_controller == null || !_isInitialized) return;
     if (state == AppLifecycleState.inactive) {
       _controller?.stop();
     } else if (state == AppLifecycleState.resumed) {
@@ -60,10 +60,16 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
   }
 
   void _initScanner() {
-    final scannerState = ref.read(scannerProvider);
-    _controller = MobileScannerController(
-      torchEnabled: scannerState.isFlashOn,
-    );
+    try {
+      _controller = MobileScannerController();
+      if (mounted) {
+        setState(() {
+          _isInitialized = true;
+        });
+      }
+    } catch (e) {
+      debugPrint('Scanner init error: $e');
+    }
   }
 
   void _onDetect(BarcodeCapture capture) async {
@@ -79,9 +85,6 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
       _isProcessing = true;
     });
 
-    // Stop scanning temporarily
-    ref.read(scannerProvider.notifier).setScanning(false);
-
     // Save to history
     final type = ScanHistory.detectType(code);
     final scan = ScanHistory(
@@ -89,58 +92,67 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
       type: type,
       scannedAt: DateTime.now(),
     );
-    await ref.read(historyProvider.notifier).addScan(scan);
+
+    try {
+      await ref.read(historyProvider.notifier).addScan(scan);
+    } catch (e) {
+      debugPrint('History save error: $e');
+    }
 
     if (mounted) {
+      // Pause the scanner before navigating
+      await _controller?.stop();
+
       context.push('/result', extra: {'content': code, 'type': type}).then((_) {
         // Resume scanning when returning from result page
-        setState(() {
-          _isProcessing = false;
-        });
-        ref.read(scannerProvider.notifier).setScanning(true);
+        if (mounted) {
+          setState(() {
+            _isProcessing = false;
+          });
+          _controller?.start();
+        }
       });
     }
   }
 
   void _toggleFlash() async {
-    ref.read(scannerProvider.notifier).toggleFlash();
-    await _controller?.toggleTorch();
+    try {
+      await _controller?.toggleTorch();
+      if (mounted) {
+        setState(() {});
+      }
+    } catch (e) {
+      debugPrint('Flash toggle error: $e');
+    }
   }
 
   Future<void> _switchCamera() async {
-    await _controller?.switchCamera();
+    try {
+      await _controller?.switchCamera();
+    } catch (e) {
+      debugPrint('Camera switch error: $e');
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final scannerState = ref.watch(scannerProvider);
-    final settingsState = ref.watch(settingsProvider);
-
-    // Sync auto zoom with settings
-    if (scannerState.isAutoZoomEnabled != settingsState.autoZoomEnabled) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        ref
-            .read(scannerProvider.notifier)
-            .setAutoZoom(settingsState.autoZoomEnabled);
-        _controller?.updateScanWindow(Rect.largest);
-      });
-    }
-
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
         child: Column(
           children: [
             // Header
-            _buildHeader(scannerState),
+            _buildHeader(),
             // Scanner preview
             Expanded(
-              child: _hasPermission
+              child: _hasPermission && _isInitialized
                   ? _buildScannerView()
-                  : _buildPermissionDenied(),
+                  : _hasPermission
+                      ? _buildLoading()
+                      : _buildPermissionDenied(),
             ),
             // Zoom slider
-            if (_hasPermission) _buildZoomSlider(scannerState),
+            if (_hasPermission && _isInitialized) _buildZoomSlider(),
             // Bottom spacing
             const SizedBox(height: 16),
           ],
@@ -149,7 +161,8 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
     );
   }
 
-  Widget _buildHeader(ScannerState scannerState) {
+  Widget _buildHeader() {
+    final scannerState = ref.watch(scannerProvider);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(
@@ -228,14 +241,63 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
           borderRadius: BorderRadius.circular(14),
           child: MobileScanner(
             controller: _controller!,
-                  onDetect: _onDetect,
+            onDetect: _onDetect,
+            errorBuilder: (context, error, child) {
+              return Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(
+                      Icons.error_outline,
+                      color: Colors.redAccent,
+                      size: 48,
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Scanner Error',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: Text(
+                        error.errorCode.message,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    ElevatedButton.icon(
+                      onPressed: () {
+                        _controller?.dispose();
+                        _initScanner();
+                      },
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Retry'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppConstants.primaryColor,
+                        foregroundColor: Colors.white,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
           ),
         ),
       ),
     );
   }
 
-  Widget _buildZoomSlider(ScannerState scannerState) {
+  Widget _buildZoomSlider() {
+    final scannerState = ref.watch(scannerProvider);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
       child: ZoomSlider(
@@ -244,8 +306,28 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
         max: AppConstants.maxZoom,
         onChanged: (value) {
           ref.read(scannerProvider.notifier).setZoom(value);
-          _controller?.setZoomScale(value);
+          try {
+            _controller?.setZoomScale(value / AppConstants.maxZoom);
+          } catch (e) {
+            debugPrint('Zoom error: $e');
+          }
         },
+      ),
+    );
+  }
+
+  Widget _buildLoading() {
+    return const Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          CircularProgressIndicator(color: AppConstants.primaryColor),
+          SizedBox(height: 16),
+          Text(
+            'Memulai kamera...',
+            style: TextStyle(color: Colors.white70, fontSize: 14),
+          ),
+        ],
       ),
     );
   }
