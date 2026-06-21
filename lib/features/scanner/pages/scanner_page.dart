@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:permission_handler/permission_handler.dart';
 import '../../../core/utils/constants.dart';
 import '../../../models/scan_history.dart';
 import '../../history/providers/history_provider.dart';
@@ -18,16 +17,21 @@ class ScannerPage extends ConsumerStatefulWidget {
 
 class _ScannerPageState extends ConsumerState<ScannerPage>
     with WidgetsBindingObserver {
+  // Let mobile_scanner manage its own controller lifecycle
   MobileScannerController? _controller;
-  bool _hasPermission = false;
   bool _isProcessing = false;
-  bool _isInitialized = false;
+  bool _hasError = false;
+  String _errorMessage = '';
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _requestCameraPermission();
+    _controller = MobileScannerController(
+      autoStart: true,
+      detectionSpeed: DetectionSpeed.normal,
+      returnImage: false,
+    );
   }
 
   @override
@@ -39,36 +43,18 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (_controller == null || !_isInitialized) return;
-    if (state == AppLifecycleState.inactive) {
-      _controller?.stop();
-    } else if (state == AppLifecycleState.resumed) {
-      _controller?.start();
-    }
-  }
-
-  Future<void> _requestCameraPermission() async {
-    final status = await Permission.camera.request();
-    if (mounted) {
-      setState(() {
-        _hasPermission = status.isGranted;
-      });
-      if (_hasPermission) {
-        _initScanner();
-      }
-    }
-  }
-
-  void _initScanner() {
-    try {
-      _controller = MobileScannerController();
-      if (mounted) {
-        setState(() {
-          _isInitialized = true;
-        });
-      }
-    } catch (e) {
-      debugPrint('Scanner init error: $e');
+    if (_controller == null) return;
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _controller!.start();
+        break;
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+        _controller!.stop();
+        break;
+      case AppLifecycleState.detached:
+        break;
     }
   }
 
@@ -105,7 +91,6 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
     if (!mounted) return;
 
     context.push('/result', extra: {'content': code, 'type': type}).then((_) {
-      // Resume scanning when returning from result page
       if (mounted) {
         setState(() {
           _isProcessing = false;
@@ -118,9 +103,6 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
   void _toggleFlash() async {
     try {
       await _controller?.toggleTorch();
-      if (mounted) {
-        setState(() {});
-      }
     } catch (e) {
       debugPrint('Flash toggle error: $e');
     }
@@ -134,6 +116,19 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
     }
   }
 
+  void _retryScanner() {
+    setState(() {
+      _hasError = false;
+      _errorMessage = '';
+    });
+    _controller?.dispose();
+    _controller = MobileScannerController(
+      autoStart: true,
+      detectionSpeed: DetectionSpeed.normal,
+      returnImage: false,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -141,19 +136,9 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
       body: SafeArea(
         child: Column(
           children: [
-            // Header
             _buildHeader(),
-            // Scanner preview
-            Expanded(
-              child: _hasPermission && _isInitialized
-                  ? _buildScannerView()
-                  : _hasPermission
-                      ? _buildLoading()
-                      : _buildPermissionDenied(),
-            ),
-            // Zoom slider
-            if (_hasPermission && _isInitialized) _buildZoomSlider(),
-            // Bottom spacing
+            Expanded(child: _buildScannerView()),
+            _buildZoomSlider(),
             const SizedBox(height: 16),
           ],
         ),
@@ -162,7 +147,6 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
   }
 
   Widget _buildHeader() {
-    final scannerState = ref.watch(scannerProvider);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(
@@ -178,20 +162,14 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
           ),
           Row(
             children: [
-              // Flash toggle
               IconButton(
                 onPressed: _toggleFlash,
-                icon: Icon(
-                  scannerState.isFlashOn
-                      ? Icons.flash_on
-                      : Icons.flash_off,
-                  color: scannerState.isFlashOn
-                      ? Colors.amber
-                      : AppConstants.textLight,
+                icon: const Icon(
+                  Icons.flash_off,
+                  color: AppConstants.textLight,
                 ),
                 tooltip: 'Flash',
               ),
-              // Switch camera (lens)
               IconButton(
                 onPressed: _switchCamera,
                 icon: const Icon(
@@ -200,7 +178,6 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
                 ),
                 tooltip: 'Switch Lens',
               ),
-              // History
               IconButton(
                 onPressed: () => context.push('/history'),
                 icon: const Icon(
@@ -209,7 +186,6 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
                 ),
                 tooltip: AppStrings.history,
               ),
-              // Settings
               IconButton(
                 onPressed: () => context.push('/settings'),
                 icon: const Icon(
@@ -226,6 +202,10 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
   }
 
   Widget _buildScannerView() {
+    if (_hasError) {
+      return _buildErrorView();
+    }
+
     return ClipRRect(
       borderRadius: BorderRadius.circular(16),
       child: Container(
@@ -243,54 +223,126 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
             controller: _controller!,
             onDetect: _onDetect,
             errorBuilder: (context, error, child) {
-              return Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Icon(
-                      Icons.error_outline,
-                      color: Colors.redAccent,
-                      size: 48,
-                    ),
-                    const SizedBox(height: 12),
-                    Text(
-                      'Scanner Error',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 24),
-                      child: Text(
-                        error.errorCode.message,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: Colors.white70,
-                          fontSize: 13,
+              // Log the actual error for debugging
+              debugPrint('MobileScanner error: ${error.errorCode} - ${error.errorDetails}');
+              
+              return Container(
+                color: Colors.black,
+                child: Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(
+                          Icons.videocam_off,
+                          color: Colors.white38,
+                          size: 64,
                         ),
-                      ),
+                        const SizedBox(height: 16),
+                        const Text(
+                          'Kamera tidak tersedia',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          error.errorCode.name,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 13,
+                          ),
+                        ),
+                        const SizedBox(height: 24),
+                        ElevatedButton.icon(
+                          onPressed: _retryScanner,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('Coba Lagi'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: AppConstants.primaryColor,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 24,
+                              vertical: 12,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 16),
-                    ElevatedButton.icon(
-                      onPressed: () {
-                        _controller?.dispose();
-                        _initScanner();
-                      },
-                      icon: const Icon(Icons.refresh),
-                      label: const Text('Retry'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppConstants.primaryColor,
-                        foregroundColor: Colors.white,
+                  ),
+                ),
+              );
+            },
+            placeholderBuilder: (context, child) {
+              return Container(
+                color: Colors.black,
+                child: const Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      CircularProgressIndicator(color: AppConstants.primaryColor),
+                      SizedBox(height: 16),
+                      Text(
+                        'Memulai kamera...',
+                        style: TextStyle(color: Colors.white54, fontSize: 14),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               );
             },
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildErrorView() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(
+              Icons.error_outline,
+              color: Colors.redAccent,
+              size: 64,
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Scanner Error',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              _errorMessage,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white54, fontSize: 13),
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: _retryScanner,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Coba Lagi'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppConstants.primaryColor,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 12,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -307,59 +359,12 @@ class _ScannerPageState extends ConsumerState<ScannerPage>
         onChanged: (value) {
           ref.read(scannerProvider.notifier).setZoom(value);
           try {
+            // mobile_scanner setZoomScale accepts 0.0 to 1.0
             _controller?.setZoomScale(value / AppConstants.maxZoom);
           } catch (e) {
             debugPrint('Zoom error: $e');
           }
         },
-      ),
-    );
-  }
-
-  Widget _buildLoading() {
-    return const Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          CircularProgressIndicator(color: AppConstants.primaryColor),
-          SizedBox(height: 16),
-          Text(
-            'Memulai kamera...',
-            style: TextStyle(color: Colors.white70, fontSize: 14),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPermissionDenied() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Icon(
-            Icons.camera_alt_outlined,
-            color: Colors.white54,
-            size: 64,
-          ),
-          const SizedBox(height: 16),
-          const Text(
-            'Izin kamera diperlukan',
-            style: TextStyle(
-              color: Colors.white70,
-              fontSize: 16,
-            ),
-          ),
-          const SizedBox(height: 8),
-          ElevatedButton(
-            onPressed: () => openAppSettings(),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppConstants.primaryColor,
-              foregroundColor: Colors.white,
-            ),
-            child: const Text('Buka Pengaturan'),
-          ),
-        ],
       ),
     );
   }
